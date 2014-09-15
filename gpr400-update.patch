@@ -1,0 +1,251 @@
+--- gpr400-master/gpr400_cs/gpr400_cs.c.orig	2013-02-20 22:07:29.000000000 +0100
++++ gpr400-master/gpr400_cs/gpr400_cs.c	2014-09-14 20:56:40.492311274 +0200
+@@ -44,8 +44,6 @@
+ #include <asm/io.h>
+ #include <asm/system.h>
+ 
+-#include <pcmcia/cs_types.h>
+-#include <pcmcia/cs.h>
+ #include <pcmcia/cistpl.h>
+ #include <pcmcia/cisreg.h>
+ #include <pcmcia/ciscode.h>
+@@ -76,7 +74,6 @@ MODULE_LICENSE("GPL");
+ #define GPR_DEBUG(n, args...)
+ #endif
+ 
+-static dev_info_t dev_info = "gpr400_cs";
+ static char *version = "GPR400 Driver 0.9.9";
+ 
+ #define CM_MAX_DEV              4
+@@ -263,7 +260,7 @@ static int gpr400_close(struct inode *in
+   return 0;
+ } 
+ 
+-static int gpr400_ioctl(struct inode *inode, struct file *file, unsigned int cmd, unsigned long arg) {
++static long gpr400_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
+   struct pcmcia_device *link;
+   gpr400_priv *dev;
+   u_char ta;      /* reader answer tag    */
+@@ -293,7 +290,7 @@ static int gpr400_ioctl(struct inode *in
+   switch (cmd) {
+   case GPR400_RESET:		/* reset the card reader	*/
+     gpr400_reset(dev);
+-    pcmcia_request_configuration(link, &link->conf);
++    pcmcia_enable_device(link);
+     /* Send select command */
+     if ((ret = tlv_send(dev, GPR400_SLCT, 0x01, "\x02")) < 0)
+       return ret;
+@@ -438,7 +435,7 @@ static int gpr400_ioctl(struct inode *in
+ 
+ static struct file_operations gpr400_chr_fops = {
+  open:    gpr400_open,
+- ioctl:   gpr400_ioctl,
++ unlocked_ioctl:   gpr400_ioctl,
+  release: gpr400_close,
+  owner:   THIS_MODULE,
+ };
+@@ -477,7 +474,7 @@ static int gpr400_resume(struct pcmcia_d
+ {
+   GPR_DEBUG(0, "gpr400 Resuming...\n");
+   gpr400_reset((gpr400_priv *)&link->priv);
+-  /* pcmcia_request_configuration(link, &link->conf); */
++  /* pcmcia_enable_device(link); */
+   GPR_DEBUG(0, "gpr400 Device resumed.\n");
+   return 0;
+ }
+@@ -512,7 +509,7 @@ static void gpr400_release(struct pcmcia
+   struct gpr400_priv *dev;
+   dev = link->priv;
+   pcmcia_disable_device(link);
+-  free_irq(link->irq.AssignedIRQ, dev);
++  free_irq(link->irq, dev);
+ }
+ 
+ #define CS_CHECK(fn, ret)						\
+@@ -521,94 +518,24 @@ static void gpr400_release(struct pcmcia
+ #define CFG_CHECK(fn, ret)			\
+   if(ret != 0) goto next_entry
+ 
++static int gpr400_conf_check(struct pcmcia_device *link, void *priv)
++{
++  if (link->config_index == 0)
++    return -EINVAL;
++
++  return pcmcia_request_io (link);
++}
++
+ static int gpr400_config(struct pcmcia_device *link) {
+   gpr400_priv *dev = link->priv;
+-  tuple_t tuple;
+-  cisparse_t parse;
+-  int last_fn, last_ret;
+-  u_char buf[64];
+-  win_req_t req;
+-  memreq_t map;
++  const char *last_fn;
++  int last_ret;
+ 
+   GPR_DEBUG(0, "gpr400_config(0x%p)\n", link);
+ 
+-  /*
+-   * This reads the card's CONFIG tuple to find its configuration
+-   * registers.
+-   */
+-  tuple.DesiredTuple = CISTPL_CONFIG;
+-  tuple.Attributes = 0;
+-  tuple.TupleData = buf;
+-  tuple.TupleDataMax = sizeof(buf);
+-  tuple.TupleOffset = 0;
+-  CS_CHECK(GetFirstTuple, pcmcia_get_first_tuple(link, &tuple));
+-  CS_CHECK(GetTupleData, pcmcia_get_tuple_data(link, &tuple));
+-  CS_CHECK(ParseTuple, pcmcia_parse_tuple(&tuple, &parse));
+-  link->conf.ConfigBase = parse.config.base;
+-  link->conf.Present = parse.config.rmask[0];
+-	
+   /* Get and parse CFTABLE_ENTRY */
+-  tuple.DesiredTuple = CISTPL_CFTABLE_ENTRY;
+-  tuple.Attributes = 0;
+-  CS_CHECK(GetFirstTuple, pcmcia_get_first_tuple(link, &tuple));
+-  while (last_ret == CS_SUCCESS) {
+-    cistpl_cftable_entry_t *cfg = &(parse.cftable_entry);
+-
+-    CFG_CHECK(GetTupleData, pcmcia_get_tuple_data(link, &tuple));
+-    CFG_CHECK(ParseTuple, pcmcia_parse_tuple(&tuple, &parse));
+-
+-    if ( cfg->index == 0 || cfg->io.nwin == 0 ) goto next_entry;
+-
+-    link->conf.ConfigIndex = cfg->index;
+-
+-    /* Use power settings for Vcc and Vpp if present */
+-    /*  Note that the CIS values need to be rescaled */
+-    if (cfg->vcc.present & (1<<CISTPL_POWER_VNOM)) {
+-      if (link->conf.Vpp != cfg->vcc.param[CISTPL_POWER_VNOM]/10000)
+-	goto next_entry;
+-    }
+-
+-    if (cfg->vpp1.present & (1<<CISTPL_POWER_VNOM))
+-      link->conf.Vpp = cfg->vpp1.param[CISTPL_POWER_VNOM]/10000;
+-				
+-
+-    /* Do we need to allocate an interrupt? */
+-    if ( cfg->irq.IRQInfo1 )
+-      link->conf.Attributes |= CONF_ENABLE_IRQ;
+-
+-    /* IO window settings */
+-    link->io.NumPorts1 = link->io.NumPorts2 = 0;
+-    if ( cfg->io.nwin > 0 ) { 
+-      cistpl_io_t *io = &cfg->io;
+-      link->io.Attributes1 = IO_DATA_PATH_WIDTH_AUTO;
+-      if (!(io->flags & CISTPL_IO_8BIT))
+-	link->io.Attributes1 = IO_DATA_PATH_WIDTH_16;
+-      if (!(io->flags & CISTPL_IO_16BIT))
+-	link->io.Attributes1 = IO_DATA_PATH_WIDTH_8;
+-
+-      link->io.IOAddrLines = io->flags & CISTPL_IO_LINES_MASK;
+-      link->io.BasePort1 = io->win[0].base;
+-      link->io.NumPorts1 = io->win[0].len;
+-      if (io->nwin > 1) {
+-	link->io.Attributes2 = link->io.Attributes1;
+-	link->io.BasePort2 = io->win[1].base;
+-	link->io.NumPorts2 = io->win[1].len;
+-      }
+-
+-      GPR_DEBUG(1, "gpr400_cs: RequestIO: 0x%04x-0x%04x\n",
+-		io->win[0].base,
+-		(io->win[0].base + io->win[0].len) - 1);
+-
+-      /* This reserves IO space but doesn't actually enable */
+-      CFG_CHECK(RequestIO, pcmcia_request_io(link, &link->io));
+-    }
+-
+-    /* If we got this far, we're cool! */
+-    break;
+-		
+-  next_entry:
+-    CS_CHECK(GetNextTuple, pcmcia_get_next_tuple(link, &tuple));
+-  }
++  link->config_flags |= CONF_AUTO_SET_VPP | CONF_AUTO_CHECK_VCC | CONF_AUTO_SET_IO | CONF_ENABLE_IRQ;
++  CS_CHECK("pcmcia_loop_config", pcmcia_loop_config(link, gpr400_conf_check, NULL));
+ 
+   /*
+    * Allocate an interrupt line.  Note that this does not assign a
+@@ -617,8 +544,8 @@ static int gpr400_config(struct pcmcia_d
+    */
+   GPR_DEBUG(0, "gpr400_cs: pcmcia_requestIRQ\n");
+    
+-  CS_CHECK(RequestIRQ, pcmcia_request_irq(link, &link->irq));
+-  dev->irq = link->irq.AssignedIRQ;
++  CS_CHECK("RequestIRQ", pcmcia_request_irq(link, gpr400_interrupt));
++  dev->irq = link->irq;
+ 
+   /*
+    * This actually configures the PCMCIA socket -- setting up
+@@ -626,45 +553,21 @@ static int gpr400_config(struct pcmcia_d
+    * card and host interface into "Memory and IO" mode.
+    */
+   GPR_DEBUG(0, "gpr400_cs: RequestConfiguration\n");
+-  CS_CHECK(RequestConfiguration, pcmcia_request_configuration(link, &link->conf));
++  CS_CHECK("RequestConfiguration", pcmcia_enable_device(link));
+ 
+   GPR_DEBUG(0, "gpr400_cs: RequestWindow\n");
+-  req.Attributes = WIN_DATA_WIDTH_8 | WIN_MEMORY_TYPE_AM | WIN_ENABLE;
+-  req.Base = 0; req.Size = 0; req.AccessSpeed = 55;
+-  CS_CHECK(RequestWindow, pcmcia_request_window(&link, &req, &link->win));
+-  map.Page = 0; map.CardOffset = 0;
+-  CS_CHECK(MapMemPage, pcmcia_map_mem_page(link->win, &map));
+-
+-  dev->am_base = ioremap(req.Base, req.Size);
+-
+-  dev->io_base = link->io.BasePort1;
+-  dev->io_mem = req.Base;
+-
+-  request_irq(dev->irq, gpr400_interrupt, IRQF_SHARED, dev_info, dev);
+-
+-  /* Finally, report what we've done */
+-  GPR_DEBUG(0, "gpr400_config : index 0x%02x: Vcc %d.%d",
+-	    link->conf.ConfigIndex,
+-	    conf.Vcc/10, conf.Vcc%10);
+-  if (link->conf.Vpp)
+-    GPR_DEBUG(0, ", Vpp %d.%d", link->conf.Vpp/10, link->conf.Vpp%10);
+-  if (link->io.NumPorts1)
+-    GPR_DEBUG(0, ", io 0x%04x-0x%04x", link->io.BasePort1,
+-	      link->io.BasePort1+link->io.NumPorts1-1);
+-  if (link->io.NumPorts2)
+-    GPR_DEBUG(0, " & 0x%04x-0x%04x", link->io.BasePort2,
+-	      link->io.BasePort2+link->io.NumPorts2-1);
+-  if (link->conf.Attributes & CONF_ENABLE_IRQ)
+-    GPR_DEBUG(0, ", irq %d\n", link->irq.AssignedIRQ);
+-  if (link->win)
+-    GPR_DEBUG(0, "gpr400_config : io_mem: %06lx-%06lx",
+-	      req.Base, req.Base + req.Size-1);
+-  GPR_DEBUG("\n");
++  link->resource[PCMCIA_IOMEM_0]->flags = WIN_DATA_WIDTH_8 | WIN_MEMORY_TYPE_AM | WIN_ENABLE;
++  link->resource[PCMCIA_IOMEM_0]->start = 0;
++  link->resource[PCMCIA_IOMEM_0]->end = 0;
++  CS_CHECK("RequestWindow", pcmcia_request_window(link, link->resource[PCMCIA_IOMEM_0], 55));
++  CS_CHECK("MapMemPage", pcmcia_map_mem_page(link, link->resource[PCMCIA_IOMEM_0], 0));
++
++  dev->am_base = ioremap(link->resource[PCMCIA_IOMEM_0]->start, resource_size(link->resource[PCMCIA_IOMEM_0]));
+ 
+   return 0;
+ 
+  cs_failed:
+-  cs_error(link, last_fn, last_ret);
++  dev_printk(KERN_NOTICE, &link->dev, "gpr400: error %d in %s\n", last_ret, last_fn);
+   gpr400_release(link);
+ 
+   return 0;
+@@ -691,13 +594,6 @@ static int __devinit gpr400_probe(struct
+   dev->release_timer.function = (void (*)(unsigned long))&gpr400_release;
+   dev->release_timer.data = (unsigned long)link;
+ 
+-  /* Interrupt setup */
+-  link->irq.Attributes = IRQ_TYPE_EXCLUSIVE;
+-  link->irq.Instance = dev;
+-  /* Config request setup */
+-  link->conf.Attributes = CONF_ENABLE_IRQ;
+-  link->conf.IntType = INT_MEMORY_AND_IO;
+-
+   init_waitqueue_head(&dev->wq);
+ 
+   return gpr400_config(link);
