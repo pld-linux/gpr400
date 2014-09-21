@@ -48,7 +48,7 @@ License:	LGPL v2.1 (IFD driver), GPL v2 (Linux kernel driver)
 Group:		Libraries
 Source0:	https://github.com/jeansch/gpr400/archive/master/%{pname}-%{snap}.tar.gz
 # Source0-md5:	1ced7ca5616c257a0229b400ffcfc822
-Patch0:		%{name}-update.patch
+Patch0:		%{pname}-update.patch
 # from http://www.hydromel.net/driver/gpr400/
 Source1:	http://www.hydromel.net/driver/gpr400/iccdrv.ZIP
 # Source1-md5:	a46a0dd7b26c1c8354c7898bcd2ae7a1
