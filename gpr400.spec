@@ -127,7 +127,7 @@ Ten pakiet zawiera moduł jądra Linuksa.\
 
 %prep
 %setup -q -n %{pname}-master
-%patch0 -p1
+%patch -P0 -p1
 
 %build
 %if %{with userspace}
